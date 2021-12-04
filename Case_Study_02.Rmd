@@ -1,0 +1,302 @@
+---
+title: "Case-Study-02"
+author: "Eric Laigaie"
+date: "11/22/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+options(scipen=999)
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(class)
+library(caret)
+library(relaimpo)
+library(fastDummies)
+library(car)
+library(e1071)
+library(ggrepel)
+```
+
+In this markdown, we will be investigating many characteristics of the Frito Lay employee data set. There are many goals of this project, but the main variables being explored is Attrition, MonthlyIncome, and JobRole. First, a regression model will be produced to find the main contributing factors to Attrition. Then, machine learning models will be utilized to predict MonthlyIncome and Attrition. Lastly, JobRole will be explored to find any business-focused insights.
+
+Youtube Presentation Link: https://youtu.be/nTLdCXi0SxQ
+
+```{r}
+# Load in Dataframe
+df <- read_csv(file=url("https://raw.githubusercontent.com/BivinSadler/MSDS_6306_Doing-Data-Science/Master/Unit%2014%20and%2015%20Case%20Study%202/CaseStudy2-data.csv"))
+
+# Check for Null Values
+anyNA(df)
+```
+
+## Data Preprocessing
+
+Before any operations are performed, the data sets presents some redundancies that can be resolved. These changes will help lighten the computational load of the regression models.
+  - First, any categorical variables with only two outcomes ('Male', 'Female' or 'Yes', 'No') will be changed to (1, 0).
+  - Then, multiple columns present similar data (DailyRate, MonthlyRate, YearlyRate) or data that is equal for all employees (EmployeeCount, StandardHours). These will be removed from the data set.
+  - Finally, all remaining character columns will be 'dummified'. This consists of creating a column for each category within a variable and populating it with 1s and 0s.
+```{r}
+# Save the initial dataframe 
+df_explore <- df
+
+# Make binary variables from two-level columns
+df$Attrition <- ifelse(df$Attrition=='Yes', 1, 0)
+df$Gender <- ifelse(df$Gender=='Male', 1, 0)
+df$OverTime <- ifelse(df$OverTime=='No', 0, 1)
+
+# Let's get rid of some unnecessary columns.
+# I don't see the purpose for multiple income columns.
+# Everyone has 80 Standard Hours, no reason to have that column.
+# Everyone is over 18, no reason to have that column.
+to_remove <- c('DailyRate', 'EmployeeCount', 'EmployeeNumber', 'HourlyRate', 'MonthlyRate', 'StandardHours', 'Over18')
+df <- df %>% dplyr::select(-all_of(to_remove))
+
+# Find all character columns
+char_df <- df %>% select_if(is.character)
+char_col_names <- colnames(char_df)
+
+# Make all character columns 'dummy'
+df <- dummy_cols(df, select_columns= char_col_names, remove_selected_columns=TRUE)
+```
+
+## Finding Most Significant Contributors to Attrition
+
+To find the main contributing factors of Attrition, a regression model is first created using all variables (except ID and Attrition) and then using a stepwise method to weed out any insignificant variables. Then, six different methods (last, first, betasq, pratt, genizi, car) are used to score and rank the variables on significance. To compute a final contribution score, the average rank of each variable across the six methods is taken. The smaller the average rank, the more a variable contributes to Attrition.
+```{r}
+# Form initial regression model
+fit_attrition <- lm(Attrition ~ .-ID, data=df)
+
+# This is ran, but the chunk is not included in the html markdown as the output is too long
+#step_attrition <- stepAIC(fit_attrition, direction="both")
+```
+
+```{r StepAIC, include=FALSE}
+# Using stepwise selection, select only significant model variables
+step_attrition <- stepAIC(fit_attrition, direction="both")
+```
+
+```{r}
+# View model summary
+summary(step_attrition)
+
+# Plot model charts
+#par(mfrow = c(2, 2))
+#plot(step_attrition)
+#plot(step_attrition,4)
+
+# Determine the most important variables - Using the 6 methods below
+# last, first, betasq, pratt, genizi, car
+last <- calc.relimp(step_attrition, type=c('last'), rela=TRUE)
+first <- calc.relimp(step_attrition, type=c('first'), rela=TRUE)
+betasq <- calc.relimp(step_attrition, type=c('betasq'), rela=TRUE)
+pratt <- calc.relimp(step_attrition, type=c('pratt'), rela=TRUE)
+genizi <- calc.relimp(step_attrition, type=c('genizi'), rela=TRUE)
+car <- calc.relimp(step_attrition, type=c('car'), rela=TRUE)
+
+# Creating dataframe of results
+RelaImpo_Ranks <- data.frame(
+  'Last' = last$last,
+  'LastRank' = last$last.rank,
+  'First' = first$first,
+  'FirstRank' = first$first.rank,
+  'Betasq' = betasq$betasq,
+  'BetasqRank' = betasq$betasq.rank,
+  'Pratt' = pratt$pratt,
+  'PrattRank' = pratt$pratt.rank,
+  'Genizi' = genizi$genizi,
+  'GeniziRank' = genizi$genizi.rank,
+  'Car' = car$car,
+  'CarRank' = car$car.rank
+)
+
+# Creating Average Rank Column
+RelaImpo_Ranks <- RelaImpo_Ranks %>% mutate(
+  AverageRank = (LastRank+FirstRank+BetasqRank+PrattRank+GeniziRank+CarRank) / 6
+)
+
+# Filter to Top 3 Factors
+Top3 <- RelaImpo_Ranks %>% dplyr::select(AverageRank) %>% arrange(AverageRank)
+Top3 <- head(Top3, 6)
+
+Top3
+```
+To explore OverTime's relationship with Attrition, we find the percentage of OverTime and non-OverTime employees for each Attrition outcome. The relationship is evident, as OverTime employees have a 32% Attrition rate while non-OverTime employees only have a 10% Attrition rate.
+
+Therefore, it may be profitable to limit the OverTime status of employees.
+```{r}
+# Checking Attrition Percentages by OverTime status
+#df %>% group_by(OverTime, Attrition) %>% summarize(n=n())
+# Percentage of OverTime employees that attrified
+( 80 / (80+172) ) * 100
+# Percentage of non-OverTime employees that attrified
+( 60 / (60+558) ) * 100
+```
+
+## Predicting MonthlyIncome
+
+Utilizing multiple linear regression again, we are predicting MonthlyIncome. This model uses every variable (except for ID and MonthlyIncome), as well as the stepwise method to weed out insignificant variables. To train the model, we pass 70% of the data through first. Then, the remaining 30% of the data is used a test data, and the model predicts MonthlyIncome for each row in that data set. Finally, the predicted vs. actual results of the test data are observed to find an error metric, root mean square error (RMSE).
+```{r}
+# Set train and test
+set.seed(10)
+trainIndices = sample(seq(1:length(df$Attrition)),round(.7*length(df$Attrition)))
+train_income = df[trainIndices,]
+test_income = df[-trainIndices,]
+
+# Split test data
+test_income_outcome <- test_income %>% dplyr::select(MonthlyIncome, ID)
+test_income <- test_income %>% dplyr::select(-MonthlyIncome)
+
+# Form initial regression model.
+fit_income <- lm(MonthlyIncome ~.-ID , data=train_income)
+
+# This is ran, but the chunk is not included in the html markdown as the output is too long
+#step_income <- stepAIC(fit_income, direction="both")
+```
+
+```{r StepAIC2, include=FALSE}
+# Using stepwise selection, select only significant model variables
+step_income <- stepAIC(fit_income, direction="both")
+```
+
+```{r}
+# View model summary
+summary(step_income) # display results
+
+# Plot model charts
+par(mfrow = c(2, 2))
+plot(step_income)
+plot(step_income,4)
+
+# Make predictions on test data
+monthly_income_predictions <- predict(step_income, newdata=test_income)
+
+# Create prediction dataframe
+predictions_MonthlyIncome <- data.frame('ID' = test_income_outcome$ID, 'Prediction' = monthly_income_predictions)
+
+# Calculate RMSE
+library(Metrics)
+rmse(test_income_outcome$MonthlyIncome, predictions_MonthlyIncome$Prediction)
+# RMSE = $1,061.064
+
+# Output Prediction CSV
+write.csv(predictions_MonthlyIncome, "C:\\Users\\ericl\\OneDrive\\Desktop\\SMU\\Doing Data Science - FALL 2021\\Case Study 02\\Predictions_MonthlyIncome.csv")
+```
+
+## Naive-Bayes Classifier for Attrition
+
+To predict Attrition, we use the same train-test procedure that we did above. However, the model is now a Naive-Bayes classifier. This model uses a probability equation named 'Bayes Theorem' to determine the probability of an employee departing based on the other variables associated with them. Again, predictions are made on the test data, and these predictions are then compared to actual attrition results to find accuracy and precision metrics.
+```{r}
+# Set seed and create Train/Test Split 
+set.seed(10)
+trainIndices = sample(seq(1:length(df$Attrition)),round(.7*length(df$Attrition)))
+train_nb = df[trainIndices,]
+test_nb = df[-trainIndices,]
+
+# Split datasets into outcome - predictor variables
+train_outcome_nb <- train_nb %>%  dplyr::select(Attrition)
+test_outcome_nb <- test_nb %>% dplyr::select(Attrition, ID)
+train_nb <- train_nb %>% dplyr::select(-Attrition)
+test_nb <- test_nb %>% dplyr::select(-Attrition)
+
+# Create model and print confusion matrix
+model = naiveBayes(train_nb,train_outcome_nb$Attrition,laplace = 1)
+predictions <- predict(model,test_nb)
+CM = confusionMatrix(table(predict(model,test_nb),test_outcome_nb$Attrition))
+CM
+
+# Create predictions dataframe and switch Attrition back to 'Yes' and 'No'
+predictions_Attrition <- data.frame('ID' = test_outcome_nb$ID, 'Prediction' = predictions)
+predictions_Attrition$Prediction <- ifelse(predictions_Attrition$Prediction == 1, 'Yes', 'No')
+
+# Accuracy - .6743
+# Sensitivity - .6816
+# Specificity - .6316
+
+# Output Prediction CSV
+write.csv(predictions_Attrition, "C:\\Users\\ericl\\OneDrive\\Desktop\\SMU\\Doing Data Science - FALL 2021\\Case Study 02\\Predictions_Attrition.csv")
+```
+
+## JobRole Exploration
+
+First, let's explore promotion pay raises by JobRole. In this case, we are looking to see which roles have stagnant / rising MonthlyIncome along JobLevels. As the results show, lower-level JobRoles are associated with higher average pay increases after promotions, in terms of percentages. My first instinct is that this pay structure is beneficial, as it incentivizes employees to work their way up through these lower-level JobRoles instead of seeking a different job.
+```{r}
+# Let's explore JobLevel and MonthlyIncome in each JobRole
+# I want to find the role with the most/least increase in pay between levels.
+
+# Find % Pay Increase by Job Role
+JobRoles <- unique(df_explore$JobRole)
+Percent_Increase <- numeric(length(JobRoles))
+
+for (i in 1:length(JobRoles)) {
+  currentRole <- JobRoles[i]
+  increases <- c()
+  for (j in 1:4) {
+    lower_level <- df_explore %>% filter(JobRole == currentRole & JobLevel == j)
+    upper_level <- df_explore %>% filter(JobRole == currentRole & JobLevel == j + 1)
+    mean_lower = mean(lower_level$MonthlyIncome)
+    mean_upper = mean(upper_level$MonthlyIncome)
+    
+    if (nrow(lower_level) > 1 & nrow(upper_level) > 1) {
+      increase = ((mean_upper - mean_lower) / mean_lower) * 100
+      increases <- c(increases, increase)
+    }
+  }
+  Percent_Increase[i] <- round(mean(increases), 2)
+}
+JobLevel_PayIncrease <- data.frame('Role' = JobRoles, 'AverageIncrease' = Percent_Increase)
+
+# Plot Avg. % Pay Increase by JobRole
+ggplot(JobLevel_PayIncrease, 
+       aes(x=AverageIncrease, y=reorder(Role,AverageIncrease), 
+           fill=AverageIncrease, label=AverageIncrease)) +
+  geom_bar(stat='identity') +
+  theme(legend.position='none') +
+  geom_text(aes(label=paste(AverageIncrease, '%', sep='')), color='white', vjust=.3, hjust=1.1) +
+  labs(x='Average Increase of Pay from Increase in 1 Job Level',
+       y='Job Role',
+       title='Average Increase of Pay between Job Levels - by Job Role')
+
+# Plot Avg. % Pay Increase by JobRole along with Avg. MonthlyIncome
+MonthlyIncome <- (sapply(split(df_explore, f = df_explore$JobRole), 
+                        function(x) mean(x$MonthlyIncome)))
+JobLevel_PayIncrease <- JobLevel_PayIncrease %>% arrange(Role)
+JobLevel_PayIncrease$MonthlyIncome <- MonthlyIncome
+ggplot(JobLevel_PayIncrease, aes(x=AverageIncrease, y=MonthlyIncome, label=Role)) + 
+  geom_point(size=2) + 
+  geom_smooth(method='lm') +
+  geom_text_repel() +
+  labs(x='Average % Pay Increase After Promotion', 
+       y='Average Monthly Income', 
+       title='Average Promotion Pay Increase vs. Average Monthly Income')
+
+# Find correlation between AverageIncrease and MonthlyIncome
+cor(JobLevel_PayIncrease$AverageIncrease, JobLevel_PayIncrease$MonthlyIncome)
+```
+Here, we are looking to see if any JobRoles have significantly different distributions within performance and satisfaction statistics. As the results show, there is no significant evidence of a difference in these metrics between JobRoles. This appears positive, as no role is being neglected. However, it should not be used as evidence that the entire workforce is satisfied or performing well.
+```{r}
+# Find trends within JobRole - JobInvolvement / JobSatisfaction / WorkLifeBalance / PerformanceRating
+
+# Check Normality Assumptions
+#ggplot(df_explore, aes(x=JobInvolvement)) + geom_density() + facet_wrap(~JobRole)
+#ggplot(df_explore, aes(x=JobSatisfaction)) + geom_density() + facet_wrap(~JobRole)
+#ggplot(df_explore, aes(x=WorkLifeBalance)) + geom_density() + facet_wrap(~JobRole)
+#ggplot(df_explore, aes(x=PerformanceRating)) + geom_density() + facet_wrap(~JobRole)
+#ggplot(df_explore, aes(x=EnvironmentSatisfaction)) + geom_density() + facet_wrap(~JobRole)
+# None pass, will have to do Kruskal-Wallis Test
+
+kruskal.test(JobInvolvement~JobRole, df_explore)
+kruskal.test(JobSatisfaction~JobRole, df_explore)
+kruskal.test(WorkLifeBalance~JobRole, df_explore)
+kruskal.test(PerformanceRating~JobRole, df_explore)
+kruskal.test(EnvironmentSatisfaction~JobRole, df_explore)
+
+# There is no statistically significant difference in any of these variables between JobRoles
+```
+
+## Conclusion:
+
+In conclusion, our goals were achieved. First, we found the most important contributions to Attrition. While all variables were ranked, the top three most significant variables were OverTime, JobInvolvement, and JobRole_ManufacturingDirector. Secondly, another linear regression model was utilized to predict MonthlyIncome. This model was successful with a RMSE of ~$1,061. For the aforementioned model, a train and test split was utilized. This means that the regression model used 70% of the data (the training set) to train itself. Then, the model predicted MonthlyIncome for the remaining 30% (the testing set). These predictions were observing alongside the actual MonthlyIncome of the test data, and an output dataset was created. In an effort to predict Attrition, a Naive-Bayes machine learning model was used. Again, a train and test split was utilized. This model made predictions with over 60% accuracy, sensitivity, and specificity (more information about these metrics can be found in the powerpoint). Again, an output dataset was created to preserve the model predictions. Finally, JobRole was investigated for business-oriented insights. First, it was found that lower-paid JobRoles tended to have higher promotion pay raises, in terms of percentages. This seems beneficial, as it should help retain talented lower-level employees. Lastly, it was found that between JobRoles, there is no significant difference in performance and satisfaction metrics. These results are good, as it shows that no role is being treated differently from the others. However, it is not evidence that performance or satisfaction is at an acceptable level, since that is a subjective checkpoint. Overall, this project utilized robust experimentation, model construction, and visualization to address the questions that were posed to me.
